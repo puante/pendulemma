@@ -54,3 +54,28 @@ def compute_lyapunov(current_history, reference_df):
 
     slope, intercept = np.polyfit(t_valid, log_diff, 1)
     return slope, t_valid, log_diff
+
+def compute_divergence_time(current_history, reference_df, threshold):
+    """
+    두 궤적의 상태 차이가 threshold를 처음 넘어서는 시점(시간)을 반환.
+    도달하지 못하면 None 반환.
+    """
+    current_df = pd.DataFrame(current_history)
+    n = min(len(current_df), len(reference_df))
+    cur = current_df.iloc[:n].reset_index(drop=True)
+    ref = reference_df.iloc[:n].reset_index(drop=True)
+
+    diff = np.sqrt(
+        (cur["theta1"] - ref["theta1"].astype(float)) ** 2 +
+        (cur["theta2"] - ref["theta2"].astype(float)) ** 2 +
+        (cur["omega1"] - ref["omega1"].astype(float)) ** 2 +
+        (cur["omega2"] - ref["omega2"].astype(float)) ** 2
+    ).values
+
+    time = cur["time"].values
+
+    exceed_idx = np.argmax(diff > threshold)  # 처음으로 threshold 넘는 인덱스
+    if diff[exceed_idx] <= threshold:
+        return None  # 끝까지 threshold를 못 넘음
+
+    return time[exceed_idx]

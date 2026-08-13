@@ -256,4 +256,3 @@ class Ui_mainWindow(object):
         self.lyapunovButton.setText(QCoreApplication.translate("mainWindow", u"\uc9c0\uc218 \ubd84\uc11d \uc2dc\ud589", None))
         self.menu.setTitle(QCoreApplication.translate("mainWindow", u"\ud30c\uc77c", None))
     # retranslateUi
-
