@@ -1,13 +1,42 @@
 import sys
+from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QFileDialog, QProgressDialog
+from PySide6.QtCore import QTimer, QThread, Signal
 from numpy.linalg import LinAlgError
 
 from gui import Ui_mainWindow
 import src.code.pendulum_calculate as pecal
 import src.code.draw as draw
 import src.code.export as export
+import src.code.analysis as analysis
+
+
+class ExportWorker(QThread):
+    progress = Signal(int)
+    finished_ok = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, pendulum, filepath, file_format):
+        super().__init__()
+        self.pendulum = pendulum
+        self.filepath = filepath
+        self.file_format = file_format
+
+    def run(self):
+        try:
+            def report(pct):
+                self.progress.emit(pct)
+
+            if self.file_format == "csv":
+                export.export_to_csv(self.pendulum, self.filepath, progress_callback=report)
+            else:
+                export.export_to_excel(self.pendulum, self.filepath, progress_callback=report)
+
+            self.finished_ok.emit(self.filepath)
+        except Exception as e:
+            self.failed.emit(str(e))
 
 
 class MainWindow(QMainWindow):
@@ -18,6 +47,23 @@ class MainWindow(QMainWindow):
         self.ui.pushButton.clicked.connect(self.start_simulation)
         self.ani = None
         self.Pc = None
+        self.Dr = None
+        self.export_worker = None
+        self.progress_dialog = None
+        self.reference_filepath = None
+
+        self.ui.selectRefButton.clicked.connect(self.select_reference_file)
+        self.ui.lyapunovButton.clicked.connect(self.compute_and_show_lyapunov)
+
+    def select_reference_file(self):
+        print("버튼 눌림!")  # 디버깅용
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "기준 파일 선택", "", "CSV Files (*.csv)"
+        )
+        print(f"선택된 파일: {filepath}")  # 디버깅용
+        if filepath:
+            self.reference_filepath = filepath
+            self.ui.referenceLabel.setText(f"기준: {filepath.split('/')[-1]}")
 
     def get_float(self, line_edit, field_name):
         text = line_edit.text().strip()
@@ -29,6 +75,12 @@ class MainWindow(QMainWindow):
         except ValueError:
             QMessageBox.warning(self, "입력값 오류", f"'{field_name}' 값이 숫자가 아닙니다: '{text}'")
             return None
+
+    @staticmethod
+    def make_default_filename(extension):
+        now = datetime.now()
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
+        return f"PendullemaData_{timestamp}.{extension}"
 
     def start_simulation(self):
         fields = [
@@ -78,7 +130,7 @@ class MainWindow(QMainWindow):
         )
         plt.show(block=False)
 
-    def animate(self, frame):
+    def animate(self, _frame):
         steps_per_frame = self.ui.Public_FrameAmount.value()
 
         try:
@@ -98,20 +150,66 @@ class MainWindow(QMainWindow):
             self.ani.event_source.stop()
         QMessageBox.critical(self, "시뮬레이션 오류", message)
 
-    def on_simulation_closed(self, event):
-        """시뮬레이션 창을 닫으면, 선택된 라디오버튼에 따라 자동으로 데이터를 내보냄"""
+    def on_simulation_closed(self, _event):
+        """matplotlib 창이 닫힐 때 호출됨. 창 정리가 끝난 뒤 저장창을 띄우려고 한 박자 늦춤."""
         if self.Pc is None or len(self.Pc.history) == 0:
             return
+        QTimer.singleShot(150, self.ask_export)
 
-        if self.ui.radioButton.isChecked():          # CSV로 내보내기
-            filepath = "output.csv"
-            export.export_to_csv(self.Pc, filepath)
-            QMessageBox.information(self, "내보내기 완료", f"{filepath}로 저장되었습니다.")
-        elif self.ui.radioButton_2.isChecked():       # Excel로 내보내기
-            filepath = "output.xlsx"
-            export.export_to_excel(self.Pc, filepath)
-            QMessageBox.information(self, "내보내기 완료", f"{filepath}로 저장되었습니다.")
-        # radioButton_3("내보내지 않음")이 선택된 경우 아무 것도 안 함
+    def compute_and_show_lyapunov(self):
+        if self.reference_filepath is None:
+            QMessageBox.warning(self, "기준 파일 없음", "먼저 비교할 기준 파일을 선택해주세요.")
+            return
+        if self.Pc is None or len(self.Pc.history) == 0:
+            QMessageBox.warning(self, "데이터 없음", "먼저 시뮬레이션을 실행해주세요.")
+            return
+
+        try:
+            ref_df = analysis.load_reference(self.reference_filepath)
+            slope, t, log_diff = analysis.compute_lyapunov(self.Pc.history, ref_df)
+            QMessageBox.information(
+                self, "리아푸노프 지수",
+                f"계산된 리아푸노프 지수 λ ≈ {slope:.4f}\n\n"
+                f"(양수: 카오스/발산, 음수 또는 0에 가까움: 수렴/유사한 궤적)"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "계산 오류", f"리아푸노프 지수 계산 중 오류:\n{e}")
+
+    def ask_export(self):
+        if self.ui.radioButton.isChecked():
+            file_format = "csv"
+            default_name = self.make_default_filename("csv")
+            filepath, _ = QFileDialog.getSaveFileName(self, "CSV로 저장", default_name, "CSV Files (*.csv)")
+        elif self.ui.radioButton_2.isChecked():
+            file_format = "excel"
+            default_name = self.make_default_filename("xlsx")
+            filepath, _ = QFileDialog.getSaveFileName(self, "Excel로 저장", default_name, "Excel Files (*.xlsx)")
+        else:
+            return  # 내보내지 않음
+
+        if not filepath:
+            return  # 사용자가 취소
+
+        self.progress_dialog = QProgressDialog("파일 저장 중...", None, 0, 100, self)
+        self.progress_dialog.setWindowTitle("내보내기")
+        self.progress_dialog.setCancelButton(None)
+        self.progress_dialog.setMinimumDuration(0)
+        self.progress_dialog.setValue(0)
+        self.progress_dialog.show()
+
+        self.export_worker = ExportWorker(self.Pc, filepath, file_format)
+        self.export_worker.progress.connect(self.progress_dialog.setValue)
+        self.export_worker.finished_ok.connect(self.on_export_finished)
+        self.export_worker.failed.connect(self.on_export_failed)
+        self.export_worker.start()
+
+    def on_export_finished(self, filepath):
+        self.progress_dialog.close()
+        QMessageBox.information(self, "내보내기 완료", f"{filepath}로 저장되었습니다.")
+
+    def on_export_failed(self, error_message):
+        self.progress_dialog.close()
+        QMessageBox.critical(self, "내보내기 실패", f"저장 중 오류가 발생했습니다:\n{error_message}")
 
 
 if __name__ == '__main__':
